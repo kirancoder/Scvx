@@ -68,17 +68,36 @@ classdef RocketLanding3D < handle
             obj.tan_gamma_gs = tan(deg2rad(obj.glideslope_angle));
             
             % Generate random initial state per the Python script
-            obj.r_I_init(3) = 500;
-            obj.r_I_init(1:2) = -300 + 600 * rand(2, 1);
-            obj.v_I_init(3) = -100 + 40 * rand(1);
-            obj.v_I_init(1:2) = (-0.5 + 0.3 * rand(2, 1)) .* obj.r_I_init(1:2);
+            % obj.r_I_init(3) = 500;
+            % obj.r_I_init(1:2) = -300 + 600 * rand(2, 1);
+            % obj.v_I_init(3) = -100 + 40 * rand(1);
+            % obj.v_I_init(1:2) = (-0.5 + 0.3 * rand(2, 1)) .* obj.r_I_init(1:2);
+            % 
+            % % Initialize quaternions (euler_to_quat helper logic included here)
+            % eul_init = deg2rad([-30 + 60*rand(1), -30 + 60*rand(1), 0]);
+            % obj.q_B_I_init = obj.euler_to_quat(eul_init);
+            % obj.q_B_I_final = obj.euler_to_quat([0, 0, 0]);
+            % 
+            % obj.w_B_init = deg2rad([-20 + 40*rand(1); -20 + 40*rand(1); 0]);
+
+            % --- Fixed Initial State ---
+            % Position: [East, North, Up] in meters
+            obj.r_I_init = [250.0; -200.0; 500.0]; 
             
-            % Initialize quaternions (euler_to_quat helper logic included here)
-            eul_init = deg2rad([-30 + 60*rand(1), -30 + 60*rand(1), 0]);
+            % Velocity: [East, North, Up] in m/s
+            % (Moving towards the pad and falling)
+            obj.v_I_init = [-30.0; -20.0; -80.0]; 
+            
+            % Initial Attitude (Euler angles to Quaternions)
+            % [Roll, Pitch, Yaw] -> e.g., tilted 20 degrees on X, -15 on Y
+            eul_init = deg2rad([20.0; -15.0; 0.0]); 
             obj.q_B_I_init = obj.euler_to_quat(eul_init);
-            obj.q_B_I_final = obj.euler_to_quat([0, 0, 0]);
+            obj.q_B_I_final = obj.euler_to_quat([0.0; 0.0; 0.0]);
             
-            obj.w_B_init = deg2rad([-20 + 40*rand(1); -20 + 40*rand(1); 0]);
+            % Initial Angular Velocity: [wx, wy, wz] in rad/s
+            % (Slight tumbling motion to be corrected)
+            obj.w_B_init = deg2rad([-5.0; 5.0; 0.0]); 
+            % ---------------------------
             
             obj.x_init = [obj.m_wet; obj.r_I_init; obj.v_I_init; obj.q_B_I_init; obj.w_B_init];
             obj.x_final = [obj.m_dry; obj.r_I_final; obj.v_I_final; obj.q_B_I_final; obj.w_B_final];
@@ -256,7 +275,7 @@ classdef RocketLanding3D < handle
             end
         end
         
-        %% --- Math Helper Functions ---
+        % --- Math Helper Functions ---
         function q = euler_to_quat(~, a)
             cy = cos(a(2) * 0.5); sy = sin(a(2) * 0.5);
             cr = cos(a(1) * 0.5); sr = sin(a(1) * 0.5);

@@ -20,10 +20,12 @@ sigma = m.t_f_guess;
 all_X = cell(1, max_iterations + 1);
 all_U = cell(1, max_iterations + 1);
 all_sigma = zeros(1, max_iterations + 1);
+all_s_prime = cell(1, max_iterations + 1); % NEW: Array for slack variables
 
 all_X{1} = m.x_redim(X);
 all_U{1} = m.u_redim(U);
 all_sigma(1) = sigma;
+s_prime_val = zeros(K, 1);    % NEW: Current working slack
 
 % 4. Setup Integrator and Problem wrapper (Free-Final-Time versions)
 integrator = Discretization(m, K);
@@ -75,6 +77,7 @@ for it = 1:max_iterations
         new_U = problem.get_variable('U');
         nu_var = problem.get_variable('nu');
         new_sigma = problem.get_variable('sigma'); % Retrieve optimized time
+        new_s_prime = problem.get_variable('s_prime'); % NEW: Retrieve slack from CVX
 
         % Integrate nonlinear dynamics with new_sigma
         X_nl = integrator.integrate_nonlinear_piecewise(new_X, new_U, new_sigma);
@@ -94,6 +97,7 @@ for it = 1:max_iterations
             X = new_X;
             U = new_U;
             sigma = new_sigma;
+            s_prime_val = new_s_prime; % NEW: Save the slack
             break;
         end
 
@@ -118,6 +122,7 @@ for it = 1:max_iterations
                 X = new_X;
                 U = new_U;
                 sigma = new_sigma;
+                s_prime_val = new_s_prime; % NEW: Save the slack
                 fprintf('Solution accepted.\n');
 
                 if rho < rho_1
@@ -145,6 +150,7 @@ for it = 1:max_iterations
         all_X = all_X(1:it+1);
         all_U = all_U(1:it+1);
         all_sigma = all_sigma(1:it+1);
+        all_s_prime{it + 1} = s_prime_val * (m.m_scale * m.r_scale);
         break;
     end
 end
@@ -193,3 +199,115 @@ for k = 1:K
             0, 'r', 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
 end
 axis equal;
+
+%--- Post-Processing Data Compilation & Saving ---
+fprintf('Compiling constraint data for all iterations...\n');
+
+num_iters = length(all_X);
+history_constraints = struct();
+
+for i = 1:num_iters
+    X_iter = all_X{i};
+    U_iter = all_U{i};
+    
+    % Initialize arrays for this iteration
+    mass              = zeros(1, K);
+    thrust_mag        = zeros(1, K);
+    gimbal_angle_deg  = zeros(1, K);
+    tilt_angle_deg    = zeros(1, K);
+    glideslope_margin = zeros(1, K);
+    omega_mag_deg     = zeros(1, K);
+    
+    for k = 1:K
+        % 1. Mass
+        mass(k) = X_iter(1, k);
+
+        % 2. Thrust Magnitude (Limits: m.T_min to m.T_max)
+        thrust_mag(k) = norm(U_iter(:, k));
+        
+        % 3. Gimbal Angle (Limit: m.max_gimbal)
+        if thrust_mag(k) > 1e-6
+            gimbal_angle_deg(k) = rad2deg(acos(U_iter(3, k) / thrust_mag(k)));
+        else
+            gimbal_angle_deg(k) = 0;
+        end
+        
+        % 4. Tilt Angle (Limit: m.max_angle)
+        % Use the quaternion to find the body Z-axis in the inertial frame
+        q = X_iter(8:11, k);
+        CBI = m.dir_cosine(q);
+        body_z_in_inertial = CBI' * [0; 0; 1];
+        
+        % Clamp value to [-1, 1] to prevent complex numbers from floating point errors
+        z_val = max(min(body_z_in_inertial(3), 1), -1); 
+        tilt_angle_deg(k) = rad2deg(acos(z_val));
+        
+        % 5. Glideslope Margin (Must be >= 0 to be valid)
+        % Constraint: r_z >= norm(r_xy) / tan(gamma_gs)
+        r_xy_norm = norm(X_iter(2:3, k));
+        r_z = X_iter(4, k);
+        glideslope_margin(k) = r_z - (r_xy_norm / m.tan_gamma_gs);
+        
+        % 6. Angular Velocity (Limit: rad2deg(m.w_B_max))
+        omega_mag_deg(k) = rad2deg(norm(X_iter(12:14, k)));
+    end
+    
+    % Store in struct
+    history_constraints(i).mass = mass;
+    history_constraints(i).thrust_mag = thrust_mag;
+    history_constraints(i).gimbal_angle_deg = gimbal_angle_deg;
+    history_constraints(i).tilt_angle_deg = tilt_angle_deg;
+    history_constraints(i).glideslope_margin = glideslope_margin;
+    history_constraints(i).omega_mag_deg = omega_mag_deg;
+end
+
+% Save workspace data to a MAT file
+filename = 'LandingTrajectoryData.mat';
+save(filename, 'all_X', 'all_U', 'all_sigma', 'all_s_prime', 'history_constraints', 'm', 'K');
+fprintf('Data successfully saved to %s\n', filename);
+
+% --- CSV Export for Final Converged Trajectory ---
+fprintf('Exporting final trajectory to CSV...\n');
+
+% Get the final converged iteration index
+final_idx = length(all_X);
+final_X_csv = all_X{final_idx};
+final_U_csv = all_U{final_idx};
+final_sigma_csv = all_sigma(final_idx);
+
+% 1. Create the time vector
+t_vec = linspace(0, final_sigma_csv, K);
+
+% 2. Calculate actual Thrust Magnitude for the CSV
+thrust_mag_csv = zeros(1, K);
+for k = 1:K
+    thrust_mag_csv(k) = norm(final_U_csv(:, k));
+end
+
+% 3. Build a MATLAB Table with labeled columns
+% Transpose (') all arrays so they are columns (K rows x 1 column)
+T = table(t_vec', ...
+          final_X_csv(1, :)', ...
+          final_X_csv(2, :)', final_X_csv(3, :)', final_X_csv(4, :)', ...
+          final_X_csv(5, :)', final_X_csv(6, :)', final_X_csv(7, :)', ...
+          final_X_csv(8, :)', final_X_csv(9, :)', final_X_csv(10, :)', final_X_csv(11, :)', ...
+          final_X_csv(12, :)', final_X_csv(13, :)', final_X_csv(14, :)', ...
+          final_U_csv(1, :)', final_U_csv(2, :)', final_U_csv(3, :)', ...
+          thrust_mag_csv', ...
+          'VariableNames', {'Time_s', 'Mass_kg', ...
+                            'Pos_X_East_m', 'Pos_Y_North_m', 'Pos_Z_Up_m', ...
+                            'Vel_X_mps', 'Vel_Y_mps', 'Vel_Z_mps', ...
+                            'Quat_w', 'Quat_x', 'Quat_y', 'Quat_z', ...
+                            'Omega_X_radps', 'Omega_Y_radps', 'Omega_Z_radps', ...
+                            'Control_Ux_N', 'Control_Uy_N', 'Control_Uz_N', ...
+                            'Thrust_Magnitude_N'});
+
+% 4. Ensure output directory exists and save
+output_dir = 'outputs';
+if ~exist(output_dir, 'dir')
+    mkdir(output_dir);
+end
+
+csv_filename = fullfile(output_dir, 'Final_Converged_Trajectory.csv');
+writetable(T, csv_filename);
+fprintf('Successfully saved final trajectory to %s\n', csv_filename);
